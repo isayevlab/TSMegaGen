@@ -55,6 +55,8 @@ We then developed **LoQI** (Low-energy QM Informed conformer generative model), 
 
 ## Setup
 
+This setup has been tested on Ubuntu 22.04, but can be used across multiple platforms as PyTorch, Pytorch Geometric, and RdKit are widely supported. Installation will usually take up to 20 minutes. 
+
 ### Prerequisites
 
 - Python 3.10+
@@ -127,6 +129,7 @@ python scripts/sample_conformers.py \
     --n_confs 10 \
     --batch_size 1
 
+
 # Generate conformers with evaluation
 python scripts/sample_conformers.py \
     --config ./conf/loqi/loqi.yaml \
@@ -136,6 +139,8 @@ python scripts/sample_conformers.py \
     --n_confs 100 \
     --batch_size 10
 ```
+
+For reference, on an RTX 3090 GPU, inference for a typical ChEMBL molecule takes approximately 0.1 seconds per conformer when processed within a batch.  
 
 Note: Make sure you define correct paths for dataset and AimNet2 model in `loqi.yaml`. The relative path of AimNet2 model is `src/megalodon/metrics/aimnet2/cpcm_model/wb97m_cpcms_v2_0.jpt`. 
 
@@ -168,7 +173,11 @@ python scripts/train.py --config-name=loqi \
 If you use LoQI in your research, please cite our paper:
 
 ```bibtex
-Citation is coming. 
+@article{nikitin2025scalable,
+  title={Scalable Low-Energy Molecular Conformer Generation with Quantum Mechanical Accuracy},
+  author={Nikitin, Filipp and Anstine, Dylan M and Zubatyuk, Roman and Paliwal, Saee Gopal and Isayev, Olexandr},
+  year={2025}
+}
 ```
 
 This work builds upon the Megalodon architecture. If you use the underlying architecture, please also cite:
