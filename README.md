@@ -1,10 +1,8 @@
-# LoQI: Scalable Low-Energy Molecular Conformer Generation with Quantum Mechanical Accuracy
+# Title will be here
 
 <div align="center">
   <a href="https://scholar.google.com/citations?user=DOljaG8AAAAJ&hl=en" target="_blank">Filipp&nbsp;Nikitin<sup>1,2</sup></a> &emsp; <b>&middot;</b> &emsp;
   <a href="#" target="_blank">Dylan&nbsp;M.&nbsp;Anstine<sup>2,3</sup></a> &emsp; <b>&middot;</b> &emsp;
-  <a href="#" target="_blank">Roman&nbsp;Zubatyuk<sup>2,5</sup></a> &emsp; <b>&middot;</b> &emsp;
-  <a href="https://scholar.google.ch/citations?user=8S0VfjoAAAAJ&hl=en" target="_blank">Saee&nbsp;Gopal&nbsp;Paliwal<sup>5</sup></a> &emsp; <b>&middot;</b> &emsp;
   <a href="https://olexandrisayev.com/" target="_blank">Olexandr&nbsp;Isayev<sup>1,2,4*</sup></a>
   <br>
   <sup>1</sup>Ray and Stephanie Lane Computational Biology Department, Carnegie Mellon University, Pittsburgh, PA, USA
@@ -14,13 +12,11 @@
   <sup>3</sup>Department of Chemical Engineering and Materials Science, Michigan State University, East Lansing, MI, USA
   <br>
   <sup>4</sup>Department of Materials Science and Engineering, Carnegie Mellon University, Pittsburgh, PA, USA
-  <br>
-  <sup>5</sup>NVIDIA, Santa Clara, CA, USA
   <br><br>
   <a href="#" target="_blank">📄&nbsp;Paper</a> &emsp; <b>&middot;</b> &emsp;
   <a href="#citation">📖&nbsp;Citation</a> &emsp; <b>&middot;</b> &emsp;
   <a href="#setup">⚙️&nbsp;Setup</a> &emsp; <b>&middot;</b> &emsp;
-  <a href="https://github.com/isayevlab/LoQI" target="_blank">🔗&nbsp;GitHub</a>
+  <a href="https://github.com/isayevlab/TSMegaGen" target="_blank">🔗&nbsp;GitHub</a>
   <br><br>
   <span><sup>*</sup>Corresponding author: olexandr@olexandrisayev.com</span>
 </div>
@@ -29,27 +25,17 @@
 
 ## Overview
 
-<div align="center">
+<!-- <div align="center">
     <img width="700" alt="Macrocycles" src="assets/macrocycles.svg"/>
-</div>
+</div> -->
 
 ### Abstract
 
-Molecular geometry is crucial for biological activity and chemical reactivity; however, computational methods for generating 3D structures are limited by the vast scale of conformational space and the complexities of stereochemistry. Here we present an approach that combines an expansive dataset of molecular conformers with generative diffusion models to address this problem. We introduce **ChEMBL3D**, which contains over 250 million molecular geometries for 1.8 million drug-like compounds, optimized using AIMNet2 neural network potentials to a near-quantum mechanical accuracy with implicit solvent effects included. This dataset captures complex organic molecules in various protonation states and stereochemical configurations. 
-
-We then developed **LoQI** (Low-energy QM Informed conformer generative model), a stereochemistry-aware diffusion model that learns molecular geometry distributions directly from this data. Through graph augmentation, LoQI accurately generates molecular structures with targeted stereochemistry, representing a significant advance in modeling capabilities over previous generative methods. The model outperforms traditional approaches, achieving up to tenfold improvement in energy accuracy and effective recovery of optimal conformations. Benchmark tests on complex systems, including macrocycles and flexible molecules, as well as validation with crystal structures, show LoQI can perform low energy conformer search efficiently.
-
-> **Note on Implementation**: LoQI is built upon the [Megalodon architecture](https://arxiv.org/pdf/2505.18392) developed, adapting it specifically for stereochemistry-aware conformer generation with the ChEMBL3D dataset.
 
 ---
 
 ## Key Features
 
-- **ChEMBL3D Dataset**: 250+ million AIMNet2-optimized conformers for 1.8M drug-like molecules
-- **Stereochemistry-Aware**: First all-atom diffusion model with explicit stereochemical encoding
-- **Quantum Mechanical Accuracy**: Near-DFT accuracy with implicit solvent effects
-- **Superior Performance**: Up to 10x improvement in energy accuracy over traditional methods
-- **Complex Molecule Support**: Handles macrocycles, flexible molecules, and challenging stereochemistry
 
 ---
 
@@ -75,34 +61,28 @@ conda create -n loqi python=3.10 -y
 conda activate loqi
 
 # Install dependencies
-pip install -e .
 pip install -r requirements.txt
+pip install -e .
 ```
 
 ### Data Setup
 
 The training and evaluation require the **ChEMBL3D** dataset. 
 
-**Available with this release [Download Here](https://drive.google.com/drive/folders/1PvSrep7_qIjTSslzXD3KUYEJ2Qr2lgDD?usp=sharing):**
-- Pre-trained LoQI model checkpoint (`loqi.ckpt`)
-- Processed ChEMBL3D lowest-energy conformers dataset (`chembl3d_stereo`)
-
-**Coming soon:**
-- Full ChEMBL3D dataset (250M+ conformers) will be released in a separate repository
-- Complete dataset processing scripts and pipeline
-
+**Available with this release:**
+- 
+- 
 
 
 ---
 
 ## Usage
 
-Make sure that `src` content is available in your `PYTHONPATH` (e.g., `export PYTHONPATH="./src:$PYTHONPATH"`) if LoQI is not installed locally (pip install -e .). 
+Make sure that `src` content is available in your `PYTHONPATH` (e.g., `export PYTHONPATH="./src:$PYTHONPATH"`) if package is not installed locally (pip install -e .). 
 
 ### Model Training
 
 ```bash
-# LoQI conformer generation model
 python scripts/train.py --config-name=loqi outdir=./outputs train.gpus=1 data.dataset_root="./chembl3d_data"
 
 # Customize training parameters
@@ -117,10 +97,10 @@ python scripts/train.py --config-name=loqi \
 
 ### Model Inference and Sampling
 
-#### Conformer Generation
+#### Transition States Generation
 
 ```bash
-# Generate conformers for a single molecule
+# Generate transitoin states for a single reaction
 python scripts/sample_conformers.py \
     --config ./conf/loqi/loqi.yaml \
     --ckpt ./data/loqi.ckpt \
@@ -140,13 +120,11 @@ python scripts/sample_conformers.py \
     --batch_size 10
 ```
 
-For reference, on an RTX 3090 GPU, inference for a typical ChEMBL molecule takes approximately 0.1 seconds per conformer when processed within a batch.  
-
-Note: Make sure you define correct paths for dataset and AimNet2 model in `loqi.yaml`. The relative path of AimNet2 model is `src/megalodon/metrics/aimnet2/cpcm_model/wb97m_cpcms_v2_0.jpt`. 
+For reference, on an RTX 3090 GPU, inference for a typical ChEMBL molecule takes approximately 0.1 seconds per conformer when processed within a batch.   
 
 #### Available Configurations
 
-**LoQI Models:**
+**Available Configs:**
 - `loqi.yaml` - LoQI stereochemistry-aware conformer generation model
 - `nextmol.yaml` - Alternative configuration for NextMol-style generation
 
@@ -170,7 +148,16 @@ python scripts/train.py --config-name=loqi \
 
 ## Citation
 
-If you use LoQI in your research, please cite our paper:
+
+```bibtex
+# citation is coming sson
+@article{
+}
+```
+
+
+
+You may also find useful our paper and model for low-energy conformer generation:
 
 ```bibtex
 @article{nikitin2025scalable,

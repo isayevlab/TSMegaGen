@@ -21,7 +21,7 @@ from torch_scatter import scatter_add
 from torch_geometric.data import Data
 
 from megalodon.dynamics.eqgat.eqgat_wrapper import EQGATWrapper
-from megalodon.dynamics.fn_model import MegaFNV3, MegaFNV3Conf
+from megalodon.dynamics.fn_model import MegaFNV3, MegaFNV3Conf, MegaFNV3TS
 from megalodon.dynamics.mega_large import MegalodonDotFN
 from megalodon.dynamics.megaflow_semla_ckpt.mimic_semla_wrapper import MimicSemlaWrapper
 from megalodon.dynamics.megaflow_semla_ckpt.original_semla_ckpt import \
@@ -38,6 +38,7 @@ class ModelBuilder:
         """Initializes the ModelBuilder with a dictionary of available model classes."""
         self.model_classes = {"megav3": MegaFNV3Wrapper, 
                               "megav3conf": MegaFNV3ConfWrapper,
+                              "megav3ts": MegaFNV3TSWrapper,
                               "mimic_semla": MimicSemlaWrapper, 
                               "mega_large": MegaLargeWrapper,
                               "original_semla": MimicOriginalSemlaWrapper,
@@ -246,6 +247,52 @@ class MegaFNV3ConfWrapper(MegaFNV3Conf):
         )
         out["h_logits"] = batch["h_t"]
         out["edge_attr_logits"] = batch["edge_attr_t"]
+        return out
+
+
+class MegaFNV3TSWrapper(MegaFNV3TS):
+    """A wrapper class for the MoCo model."""
+
+    def __init__(self, args_dict, time_type="continuous", timesteps=None):
+        """
+        Initializes the DiTWrapper.
+
+        Args:
+            args_dict (dict): A dictionary of arguments for initializing the MoCo model.
+        """
+        self.args = args_dict
+        self.time_type = time_type
+        self.timesteps = timesteps
+        super().__init__(**args_dict)
+
+    def forward(self, batch, time, conditional_batch=None, timesteps=None):
+        """
+        Forward pass of the MoCo model.
+
+        Args:
+            batch (torch_geometric.data.Batch): The input batch.
+            time (Tensor): The time tensor.
+
+        Returns:
+            dict: The output of the MoCo model.
+        """
+        timesteps = timesteps if timesteps is not None else self.timesteps
+        if self.time_type == "discrete" and timesteps is not None:
+            time = (timesteps - time.float()) / timesteps
+        x = super().forward(
+            batch=batch["batch"],
+            X=batch["ts_coord_t"],
+            H=batch["numbers_t"],
+            ER=batch["bmat_r_t"],
+            EP=batch["bmat_p_t"],
+            E_idx=batch["edge_index"],
+            t=time,
+        )
+        out = {}
+        out["bmat_r_logits"] = batch["bmat_r_t"]
+        out["bmat_p_logits"] = batch["bmat_p_t"]
+        out["numbers_logits"] = batch["numbers_t"]
+        out["ts_coord_hat"] = x
         return out
     
 

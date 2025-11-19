@@ -25,10 +25,12 @@ from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from omegaconf import DictConfig, OmegaConf
 
 from megalodon.data.batch_preprocessor import BatchPreProcessor
+from megalodon.data.ts_batch_preprocessor import TsBatchPreProcessor
 from megalodon.data.molecule_datamodule import MoleculeDataModule
 from megalodon.data.statistics import Statistics
 from megalodon.metrics.molecule_evaluation_callback import MoleculeEvaluationCallback
 from megalodon.metrics.conformer_evaluation_callback import ConformerEvaluationCallback
+from megalodon.metrics.ts_evaluation_callback import TransitionStatesEvaluationCallback
 from megalodon.models.module import Graph3DInterpolantModel
 
 
@@ -45,8 +47,13 @@ def main(cfg: DictConfig) -> None:
     os.makedirs(os.path.join(cfg.outdir, 'checkpoints'), exist_ok=True)
     loss_fn = None
 
-    batch_preprocessor = BatchPreProcessor(aug_rotations=cfg.data.aug_rotations,
-                                        scale_coords=cfg.data.scale_coords)
+    if cfg.evaluation.type == "transition_states":
+        batch_preprocessor = TsBatchPreProcessor(aug_rotations=cfg.data.aug_rotations,
+                                           scale_coords=cfg.data.scale_coords)
+    else:
+        batch_preprocessor = BatchPreProcessor(aug_rotations=cfg.data.aug_rotations,
+                                           scale_coords=cfg.data.scale_coords)
+
     if cfg.resume:
         if os.path.isdir(cfg.resume):
             cfg.resume = f"{cfg.resume}/last.ckpt"
@@ -144,6 +151,13 @@ def main(cfg: DictConfig) -> None:
             energy_metrics_args=energy_metrics_args,
             scale_coords=cfg.evaluation.scale_coords,
             compute_stereo_metrics=cfg.evaluation.compute_stereo_metrics
+        )
+    elif cfg.evaluation.type == "transition_states":
+        evaluation_callback = TransitionStatesEvaluationCallback(
+            max_molecules=cfg.evaluation.max_molecules,
+            timesteps=cfg.evaluation.timesteps,
+            scale_coords=cfg.evaluation.scale_coords,
+            save_dir=cfg.evaluation.save_dir
         )
     else: 
         raise NotImplementedError
