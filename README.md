@@ -78,15 +78,35 @@ The training and evaluation require the **ChEMBL3D** dataset.
 
 ## Usage
 
-Make sure that `src` content is available in your `PYTHONPATH` (e.g., `export PYTHONPATH="./src:$PYTHONPATH"`) if package is not installed locally (pip install -e .). 
+Make sure the package is installed locally: `pip install -e .` 
 
 ### Model Training
 
 ```bash
-python scripts/train.py --config-name=loqi outdir=./outputs train.gpus=1 data.dataset_root="./chembl3d_data"
+# Train transition state model from scratch
+python scripts/train.py \
+    --config-path=./conf/ \
+    --config-name ts_extended_data \
+    train.gpus=1 \
+    train.seed=28 \
+    run_name=test_train \
+    outdir="../test_runs" \
+    data.dataset_root="/path/to/ts_dataset"
+
+# Resume training from checkpoint
+python scripts/train.py \
+    --config-path=./conf/ \
+    --config-name ts_extended_data \
+    train.gpus=1 \
+    train.seed=28 \
+    run_name=test_train \
+    outdir="../test_runs" \
+    resume="./models/last_converted.ckpt"
 
 # Customize training parameters
-python scripts/train.py --config-name=loqi \
+python scripts/train.py \
+    --config-path=./conf/ \
+    --config-name ts_extended_data \
     outdir=./outputs \
     train.gpus=2 \
     train.n_epochs=800 \
@@ -100,31 +120,53 @@ python scripts/train.py --config-name=loqi \
 #### Transition States Generation
 
 ```bash
-# Generate transitoin states for a single reaction
-python scripts/sample_conformers.py \
-    --config ./conf/loqi/loqi.yaml \
-    --ckpt ./data/loqi.ckpt \
-    --input "c1ccccc1" \
-    --output ./outputs/benzene_conformers.sdf \
-    --n_confs 10 \
-    --batch_size 1
+# Generate transition states from atom-mapped SMILES
+python scripts/sample_transition_state.py \
+    --reactant_smi "[C:1]([c:2]1[n:3][o:4][n:5][n:6]1)([H:7])([H:8])[H:9]" \
+    --product_smi "[C:1]1([H:7])([H:8])/[C:2](=[N:3]\\[H:9])[N:6]1[N:5]=[O:4]" \
+    --config scripts/conf/ts_extended_data.yaml \
+    --ckpt models/last_converted.ckpt \
+    --output output.xyz \
+    --n_samples 1 \
+    --batch_size 32
 
+# Generate transition states from XYZ files
+python scripts/sample_transition_state.py \
+    --reactant_xyz reactant.xyz \
+    --product_xyz product.xyz \
+    --config scripts/conf/ts_extended_data.yaml \
+    --ckpt models/last_converted.ckpt \
+    --output output.xyz \
+    --n_samples 5 \
+    --batch_size 32
 
-# Generate conformers with evaluation
-python scripts/sample_conformers.py \
-    --config ./conf/loqi/loqi.yaml \
-    --ckpt ./data/loqi.ckpt \
-    --input "CCO" \
-    --output ./outputs/ethanol_conformers.sdf \
-    --n_confs 100 \
-    --batch_size 10
+# Generate multiple samples per reaction
+python scripts/sample_transition_state.py \
+    --reactant_smi "[C:1][C:2]([H:3])([H:4])[H:5]" \
+    --product_smi "[C:1]=[C:2]([H:3])[H:4]" \
+    --config scripts/conf/ts_extended_data.yaml \
+    --ckpt models/last_converted.ckpt \
+    --output ts_samples.xyz \
+    --n_samples 10 \
+    --batch_size 32
 ```
 
-For reference, on an RTX 3090 GPU, inference for a typical ChEMBL molecule takes approximately 0.1 seconds per conformer when processed within a batch.   
+**Input formats:**
+- **SMILES**: Atom-mapped SMILES with explicit hydrogens (e.g., `[C:1][H:2]`)
+- **XYZ**: Standard XYZ coordinate files (bonds will be inferred using OpenBabel)
+
+**Notes:**
+- SMILES must have explicit hydrogens and can use atom mapping to specify atom correspondence
+- Reactant and product must have the same number of atoms
+- Output is saved as XYZ file(s) with transition state coordinates   
 
 #### Available Configurations
 
-**Available Configs:**
+**Transition State Configs:**
+- `ts_extended_data.yaml` - Transition state model configuration
+- `ts1x.yaml` - Alternative transition state configuration
+
+**Model Configs:**
 - `loqi.yaml` - LoQI stereochemistry-aware conformer generation model
 - `nextmol.yaml` - Alternative configuration for NextMol-style generation
 
@@ -134,13 +176,15 @@ You can easily override configuration parameters:
 
 ```bash
 # Example with custom parameters
-python scripts/train.py --config-name=loqi \
+python scripts/train.py \
+    --config-path=./conf/ \
+    --config-name ts_extended_data \
     outdir=./my_training \
     run_name=my_experiment \
     train.gpus=4 \
     train.n_epochs=500 \
     data.batch_size=64 \
-    data.dataset_root="/path/to/chembl3d" \
+    data.dataset_root="/path/to/ts_dataset" \
     wandb_params.mode=online
 ```
 
