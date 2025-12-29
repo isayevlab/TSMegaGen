@@ -96,6 +96,8 @@ class Graph3DInterpolantModel(pl.LightningModule):
             
         for loss_params in self.loss_params.variables:
             index = loss_params.variable_name
+            # Get optional loss_type parameter (default 'mse', can be 'rmsd' for GoFlow)
+            loss_type = getattr(loss_params, 'loss_type', 'mse')
             if "use_distance" in loss_params:
                 loss_functions[index] = InterpolantLossFunction(
                     loss_scale=loss_params.loss_scale,
@@ -103,12 +105,14 @@ class Graph3DInterpolantModel(pl.LightningModule):
                     continuous=loss_params.continuous,
                     use_distance=loss_params.use_distance,
                     distance_scale=loss_params.distance_scale,  # TODO make these optional
+                    loss_type=loss_type,
                 )
             else:
                 loss_functions[index] = InterpolantLossFunction(
                     loss_scale=loss_params.loss_scale,
                     aggregation=loss_params.aggregate,
                     continuous=loss_params.continuous,
+                    loss_type=loss_type,
                 )
         return loss_functions
 
@@ -196,15 +200,18 @@ class Graph3DInterpolantModel(pl.LightningModule):
             else:
                 raise NotImplementedError(
                     'LR Scheduler not supported: %s' % self.lr_scheduler_params.type)
+            lr_scheduler_config = {
+                "scheduler": scheduler,
+                "interval": self.lr_scheduler_params.interval,
+                "frequency": self.lr_scheduler_params.frequency,
+                "strict": False,
+            }
+            # ReduceLROnPlateau requires a monitor
+            if self.lr_scheduler_params.type == "plateau":
+                lr_scheduler_config["monitor"] = self.lr_scheduler_params.monitor
             return {
                 "optimizer": optimizer,
-                "lr_scheduler": {
-                    "scheduler": scheduler,
-                    "interval": self.lr_scheduler_params.interval,
-                    # "monitor": self.lr_scheduler_params.monitor,
-                    "frequency": self.lr_scheduler_params.frequency,
-                    "strict": False,
-                },
+                "lr_scheduler": lr_scheduler_config,
             }
         else:
             return {
@@ -247,14 +254,20 @@ class Graph3DInterpolantModel(pl.LightningModule):
                 batch[f"{interp_param.variable_name}_t"] = batch[f"{interp_param.variable_name}"]
             else:
                 if interp_param.variable_name == "edge_attr":
-                    _, batch[f"{interp_param.variable_name}_t"], _ = interpolant.interpolate_edges(
+                    target, batch[f"{interp_param.variable_name}_t"], _ = interpolant.interpolate_edges(
                         batch.batch, batch[f"{interp_param.variable_name}"], batch["edge_index"],
                         time
                     )
                 else:
-                    _, batch[f"{interp_param.variable_name}_t"], _ = interpolant.interpolate(
+                    target, batch[f"{interp_param.variable_name}_t"], _ = interpolant.interpolate(
                         batch.batch, batch[f"{interp_param.variable_name}"], time
                     )
+                # For flow matching methods that predict velocity, store the velocity target
+                # GoFlow always predicts velocity; continuous_flow_matching can predict velocity or data
+                prediction_type = interp_param.get('prediction_type', 'data')
+                if ((interp_param.interpolant_type == 'continuous_flow_matching' and
+                     prediction_type == 'velocity')):
+                    batch[f"{interp_param.variable_name}_target"] = target
             if "concat" in interp_param or "discrete" in interp_param.interpolant_type:
                 batch[f"{interp_param.variable_name}_t"] = F.one_hot(
                     batch[f"{interp_param.variable_name}_t"], interp_param.num_classes
@@ -363,8 +376,9 @@ class Graph3DInterpolantModel(pl.LightningModule):
                 )
             else:
                 if loss_fn.continuous:
+                    target_key = f'{key}_target' if f'{key}_target' in batch else key
                     sub_loss, sub_pred = loss_fn(
-                        batch_geo, out[f'{key}_hat'], batch[f'{key}'], batch_weight=ws_t,
+                        batch_geo, out[f'{key}_hat'], batch[target_key], batch_weight=ws_t,
                         level=level
                     )
                 else:
@@ -387,7 +401,7 @@ class Graph3DInterpolantModel(pl.LightningModule):
                 else:
                     z_hat = None
                 distance_loss_tp, distance_loss_tz, distance_loss_pz = loss_fn.distance_loss(
-                    batch_geo, out[f'{key}_hat'], batch[f'{key}'], z_hat
+                    batch_geo, out[f'{key}_hat'], batch[f'{key}'], z_hat, time=time
                 )
                 distance_loss = distance_loss_tp + distance_loss_tz + distance_loss_pz
                 self.log(f"{stage}/distance_loss", distance_loss, batch_size=batch_size)
@@ -401,6 +415,7 @@ class Graph3DInterpolantModel(pl.LightningModule):
             self.log(f"{stage}/additional_loss_term", add_loss, batch_size=batch_size,
                      prog_bar=True)
         self.log(f"{stage}/loss", loss, batch_size=batch_size)
+        self.log(f"{stage}/loss_epoch", loss, batch_size=batch_size, on_step=False, on_epoch=True)
         return loss, predictions
 
     def forward(self, batch, time):
@@ -468,6 +483,8 @@ class Graph3DInterpolantModel(pl.LightningModule):
         """
         Generates num_samples. Can supply a batch for inital starting points for conditional sampling for any interpolants set to None.
         """
+        # Get return_step_output from config (default False for backwards compatibility)
+        return_step_output = getattr(self.sampling_params, 'return_step_output', False)
 
         assert num_samples is not None or batch is not None
 
@@ -590,16 +607,16 @@ class Graph3DInterpolantModel(pl.LightningModule):
                         dt=dt,
                     )
 
-        # samples = {key: data[f"{key}_t"] for key in self.interpolants.keys()}
-
-        ### TMP change here
         samples = {}
         for interp_param in self.interpolant_params.variables:
             key = interp_param.variable_name
             if "discrete" in interp_param.interpolant_type:
                 samples[key] = torch.argmax(out[f"{key}_hat"], dim=-1)
             else:
-                samples[key] = out[f"{key}_hat"]
+                if return_step_output:
+                    samples[key] = data[f"{key}_t"]
+                else:
+                    samples[key] = out[f"{key}_hat"]
 
         samples["batch"] = batch_index
         samples["edge_index"] = edge_index

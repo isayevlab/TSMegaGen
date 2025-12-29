@@ -31,6 +31,7 @@ class ContinuousFlowMatchingInterpolant(Interpolant):
         vector_field_type (str): Type of interpolant update weight.
         solver_type (str): ODE or SDE
         timesteps (int): Number of interpolant steps
+        prediction_type (str): 'data' (predict x1) or 'velocity' (predict v = x1 - x0)
     """
 
     def __init__(
@@ -53,7 +54,8 @@ class ContinuousFlowMatchingInterpolant(Interpolant):
         clip_t: float = 0.9,
         loss_weight_type: str = 'uniform',  # 'uniform' 'frameflow' (0.1/(1-t))**2 [0.01, 100] 'snr' t/(1-t)
         loss_t_scale: float = 0.1,  # this makes max scale 1
-        inference_noise_sigma = None
+        inference_noise_sigma = None,
+        prediction_type: str = 'data',  # 'data' (predict x1) or 'velocity' (predict v = x1 - x0)
     ):
         super(ContinuousFlowMatchingInterpolant, self).__init__(prior_type, solver_type, timesteps, time_type)
         self.num_classes = num_classes
@@ -67,6 +69,7 @@ class ContinuousFlowMatchingInterpolant(Interpolant):
         self.clip_t = clip_t
         self.loss_weight_type = loss_weight_type
         self.loss_t_scale = loss_t_scale
+        self.prediction_type = prediction_type
         if inference_noise_sigma is not None:
             self.inference_noise_sigma = inference_noise_sigma
         else:
@@ -148,28 +151,51 @@ class ContinuousFlowMatchingInterpolant(Interpolant):
         return data_scale.unsqueeze(1), (1 - data_scale).unsqueeze(1)
 
     @torch.no_grad()
-    def equivariant_ot_prior(self, batch, data_chunk):
+    def equivariant_ot_prior(self, batch, data_chunk, permutation=True):
+        """Align prior to data using Kabsch alignment, optionally with Hungarian permutation."""
         aligned_prior = self.prior_func(batch, data_chunk.shape, data_chunk.device)
         batch_size = torch.max(batch) + 1
         for i in range(batch_size):
             mask = batch == i
-            aligned_prior[mask] = align_prior(aligned_prior[mask], data_chunk[mask], permutation=True, rigid_body=True)
+            aligned_prior[mask] = align_prior(aligned_prior[mask], data_chunk[mask], permutation=permutation, rigid_body=True)
         return aligned_prior
 
     def interpolate(self, batch, x1, time):
         """
         Interpolate using continuous flow matching method.
+
+        Returns:
+            target: x1 if prediction_type='data', or velocity (x1 - x0) if prediction_type='velocity'
+            x_t: interpolated position
+            x0: prior sample
         """
         if self.optimal_transport in ["equivariant_ot", "scale_ot"]:
-            x0 = self.equivariant_ot_prior(batch, x1)
+            # Align x0 to x1 - note: this doesn't work well for sampling
+            x0 = self.equivariant_ot_prior(batch, x1, permutation=True)
+            x1_aligned = x1
+        elif self.optimal_transport == "rigid":
+            # Align x0 (noise) to x1 (data) using Kabsch, no permutation
+            x0 = self.equivariant_ot_prior(batch, x1, permutation=False)
+            x1_aligned = x1
         else:
             x0 = self.prior_func(batch, x1.shape, x1.device)
+            x1_aligned = x1
         data_scale, noise_scale = self.forward_schedule(batch, time)
         if self.noise_sigma > 0:
             interp_noise = self.prior_func(batch, x1.shape, x1.device) * self.noise_sigma
         else:
             interp_noise = 0
-        return x1, data_scale * x1 + noise_scale * x0 + interp_noise, x0
+        x_t = data_scale * x1_aligned + noise_scale * x0 + interp_noise
+
+        # Return target based on prediction_type
+        if self.prediction_type == 'velocity':
+            # For velocity prediction, target is the constant velocity v = x1 - x0
+            target = x1_aligned - x0
+        else:
+            # For data prediction, target is x1
+            target = x1_aligned
+
+        return target, x_t, x0
 
     def vector_field(self, batch, x1, xt, time):
         """
@@ -204,17 +230,20 @@ class ContinuousFlowMatchingInterpolant(Interpolant):
     def step(self, batch, xt, x_hat, time, x0=None, dt=None):
         """
         Perform a euler step in the continuous flow matching method.
-        Here we allow two options for the choice of update: vector field as a function of t and end point vector field
+
+        For prediction_type='data' (x_hat is predicted x1):
          A) VF = x1 - xt /(1-t) --> x_next = xt + 1/(1-t) * dt * (x_hat - xt) see Lipman et al. https://arxiv.org/pdf/2210.02747
          B) Linear with dynamics as data prediction VF = x1 - x0 --> x_next = xt +  dt * (x_hat - x0) see Tong et al. https://arxiv.org/pdf/2302.00482 sec 3.2.2 basic I-CFM
-        Both of which can add additional noise.
+
+        For prediction_type='velocity' (x_hat is predicted velocity):
+         x_next = xt + dt * x_hat (direct Euler integration)
         """
-        # import ipdb; ipdb.set_trace()
-        if self.vector_field_type == "standard":
-            # data_scale, noise_scale = self.reverse_schedule(
-            #     batch, time, dt
-            # )  #! this is same as xt + vf*df where vf = (xhat-xt)/(1-t) and can use the vector_field function
-            # x_next = data_scale * x_hat + noise_scale * xt
+        if self.prediction_type == 'velocity':
+            # x_hat is the predicted velocity, use it directly
+            v_pred = x_hat
+            x_next = xt + dt * v_pred
+        elif self.vector_field_type == "standard":
+            # x_hat is predicted x1, convert to velocity
             vf = self.vector_field(batch, x_hat, xt, time)
             x_next = xt + dt * vf
         elif self.vector_field_type == "endpoint":
@@ -222,6 +251,10 @@ class ContinuousFlowMatchingInterpolant(Interpolant):
             x_next = xt + data_scale * (x_hat - x0)
         else:
             raise ValueError(f"f{self.vector_field_type} is not a recognized vector_field_type")
-        # if self.noise_sigma > 0:
-        #     x_next += self.prior_func(batch, x_hat.shape, x_hat.device) * self.noise_sigma  # torch.randn_like(x_hat)
+
+        # Center if COM-free
+        if self.com_free:
+            batch_size = int(batch.max()) + 1
+            x_next = x_next - scatter_mean(x_next, batch, dim=0, dim_size=batch_size)[batch]
+
         return x_next

@@ -1,6 +1,6 @@
-run_name: 'ts_batch2'
+run_name: 'ts_flow_extended_data'
 outdir: null
-resume: ../results/ts_aug_590k_v2/checkpoints/best-epoch=599-step=529800--val_loss=0.000.ckpt
+resume: null
 
 ema: True
 wandb_params:
@@ -20,55 +20,48 @@ data:
 loss:
   variables:
     - variable_name: 'ts_coord'
-      loss_scale: 3.0
+      loss_scale: 1.0
       aggregate: 'mean'
       continuous: True
+      loss_type: 'rmsd'  # GoFlow uses RMSD loss (sqrt of MSE)
       use_distance: null
       distance_scale: null
 
 interpolant:
-  timesteps: &timesteps 100
-  time_type: &time_type "discrete" #["discrete, "continuous]
-  scheduler_type: &scheduler_type "cosine_adaptive" #["cosine_adaptive, "linear"]
-  sample_time_method: "uniform" # ["symmetric", "uniform", "stab_mode", "logit_normal", "beta"]
-  sample_time_mean: 0 # Used in stab_mode and logit_normal
-  sample_time_scale: 0.81 # Used in stab_mode and logit_normal
-  global_variable_name: 'ts_coord' # variable that is specficed below to be used for sampling time and loss sampling
-  min_t: &min_t 0
+  timesteps: &timesteps 25  # GoFlow uses fewer ODE steps (10-25 typical)
+  time_type: &time_type "continuous"
+  sample_time_method: "uniform"
+  sample_time_mean: 0
+  sample_time_scale: 1.0
+  global_variable_name: 'ts_coord'
+  min_t: &min_t 0.0
   variables:
     - variable_name: 'ts_coord'
-      interpolant_type: 'continuous_diffusion' #["continuous_diffusion", "continuous_flow_matching"]
-      diffusion_type: 'vdm'
+      interpolant_type: 'goflow'
       prior_type: 'gaussian'
       timesteps: *timesteps
       num_classes: 3
-      scheduler_type: *scheduler_type
-      scheduler_cut: False
       time_type: *time_type
-      nu: 2.5
       com_free: True
       min_t: *min_t
     - variable_name: 'numbers'
-      interpolant_type: "discrete_null" #["discrete_diffusion", "discrete_flow_matching"]
+      interpolant_type: "discrete_null"
       num_classes: &num_atoms 54
       prior_type: null
     - variable_name: 'bmat_r'
-      interpolant_type: "discrete_null" #["discrete_diffusion", "discrete_flow_matching"]
+      interpolant_type: "discrete_null"
       num_classes: 9
       prior_type: null
     - variable_name: 'bmat_p'
-      interpolant_type: "discrete_null" #["discrete_diffusion", "discrete_flow_matching"]
+      interpolant_type: "discrete_null"
       num_classes: 9
       prior_type: null
-
     - variable_name: 'charges'
-      interpolant_type: "discrete_null" #["discrete_diffusion", "discrete_flow_matching"]
+      interpolant_type: "discrete_null"
       concat: 'numbers'
       num_classes: 7
       offset: 4
       prior_type: null
-
-
 
 dynamics:
   model_name: "megav3ts"
@@ -87,23 +80,13 @@ dynamics:
     timesteps: *timesteps
     time_type: *time_type
 
-self_conditioning:
-  name: "base"
-  variables:
-    - variable_name: ts_coord
-      hidden_dims: 32
-      fuse_softmax: False
-      vector: True
-      clamp_min: -100
-      clamp_max: 100
-
 sample:
   node_distribution: null
 
 train:
   seed: 48
   gpus: 1
-  n_epochs: 800
+  n_epochs: 1000
   enable_progress_bar: True
   gradient_clip_value: 1.0
   log_freq: 50
@@ -117,8 +100,7 @@ evaluation:
   max_molecules: 200
   timesteps: *timesteps
   scale_coords: *scale_coords
-  save_dir: 'ts_data'
-
+  save_dir: "/home/fnikitin/TSMegaGen/data/${run_name}"
 
 optimizer:
   type: adamw

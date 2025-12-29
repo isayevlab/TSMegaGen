@@ -45,17 +45,19 @@ def align_prior(prior_feat: torch.Tensor, dst_feat: torch.Tensor, permutation=Fa
 
 def rigid_alignment(x_0, x_1, pre_centered=False):
     """
+    Align x_0 to x_1 using the Kabsch algorithm.
     See: https://en.wikipedia.org/wiki/Kabsch_algorithm
-    Alignment of two point clouds using the Kabsch algorithm.
-    Based on: https://gist.github.com/bougui505/e392a371f5bab095a3673ea6f4976cc8
+
+    Finds optimal rotation R that minimizes ||x_0 @ R - x_1||.
+    Returns x_0 rotated and translated to match x_1.
     """
     d = x_0.shape[1]
     assert x_0.shape == x_1.shape, "x_0 and x_1 must have the same shape"
 
-    # remove COM from data and record initial COM
+    # Center both point clouds
     if pre_centered:
-        x_0_mean = torch.zeros(1, d)
-        x_1_mean = torch.zeros(1, d)
+        x_0_mean = torch.zeros(1, d, device=x_0.device)
+        x_1_mean = torch.zeros(1, d, device=x_0.device)
         x_0_c = x_0
         x_1_c = x_1
     else:
@@ -64,24 +66,19 @@ def rigid_alignment(x_0, x_1, pre_centered=False):
         x_0_c = x_0 - x_0_mean
         x_1_c = x_1 - x_1_mean
 
-    # Covariance matrix
+    # Covariance matrix H = x_0^T @ x_1
     H = x_0_c.T.mm(x_1_c)
     U, S, V = torch.svd(H)
-    # Rotation matrix
-    R = V.mm(U.T)
-    # Translation vector
-    if pre_centered:
-        t = torch.zeros(1, d)
-    else:
-        t = x_1_mean - R.mm(x_0_mean.T).T  # has shape (1, D)
 
-    # apply rotation to x_0_c
-    x_0_aligned = x_0_c.mm(R.T)
+    # Handle reflection: ensure proper rotation (det(R) = 1)
+    d_sign = torch.det(V.mm(U.T))
+    D = torch.eye(d, device=x_0.device)
+    D[-1, -1] = d_sign.sign()
 
-    # move x_0_aligned to its original frame
-    x_0_aligned = x_0_aligned + x_0_mean
+    # Optimal rotation: R = V @ D @ U^T
+    R = V.mm(D).mm(U.T)
 
-    # apply the translation
-    x_0_aligned = x_0_aligned + t
+    # Apply rotation to centered x_0, then translate to x_1's centroid
+    x_0_aligned = x_0_c.mm(R.T) + x_1_mean
 
     return x_0_aligned

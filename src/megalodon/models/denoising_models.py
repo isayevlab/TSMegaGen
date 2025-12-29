@@ -14,8 +14,11 @@
 # limitations under the License.
 
 import random
+import sys
+from pathlib import Path
 
 import torch
+import torch.nn as nn
 from torch_geometric.utils import to_dense_adj
 from torch_scatter import scatter_add
 from torch_geometric.data import Data
@@ -36,17 +39,17 @@ class ModelBuilder:
 
     def __init__(self):
         """Initializes the ModelBuilder with a dictionary of available model classes."""
-        self.model_classes = {"megav3": MegaFNV3Wrapper, 
+        self.model_classes = {"megav3": MegaFNV3Wrapper,
                               "megav3conf": MegaFNV3ConfWrapper,
                               "megav3ts": MegaFNV3TSWrapper,
                               "mimic_semla": MimicSemlaWrapper, 
                               "mega_large": MegaLargeWrapper,
                               "original_semla": MimicOriginalSemlaWrapper,
-                              "semla": SemlaWrapper, 
+                              "semla": SemlaWrapper,
                               "eqgat": EQGATWrapper,
                               "jodo": JODOWrapper,
                               "nextmolconf": NextMolConfWrapper,
-
+                              "gotennet": GotenNetWrapper,
                               }
 
     def create_model(self, model_name: str, args_dict: dict, wrapper_args: dict):
@@ -468,4 +471,177 @@ class JODOWrapper(DGT_concat):
         if self.self_cond:
             out["cond_x"] = cond_x
             out["cond_edge_x"] = cond_edge_x
+        return out
+
+
+class GotenNetWrapper(nn.Module):
+    """
+    GotenNet wrapper for Megalodon.
+
+    Wraps GoFlow's GotenNet architecture to work with Megalodon's data format.
+    Key features:
+    1. Filters edges where type is 0 at the beginning (removes no-bond edges)
+    2. Uses GotenNet's internal graph augmentation (_extend_condensed_graph_edge)
+    3. Uses the exact same Atomwise3DOut layer as GoFlow for velocity prediction
+
+    Edge type encoding (from TSDiff/GoFlow):
+        edge_type = r_bond * 22 + p_bond
+        where r_bond and p_bond are RDKit bond type indices (0=none, 1=single, 2=double, etc.)
+    """
+
+    def __init__(self, args_dict, time_type="continuous", timesteps=None):
+        super().__init__()
+        self.args = args_dict
+        self.time_type = time_type
+        self.timesteps = timesteps
+
+        # Lazy import to avoid circular imports and path issues
+        from gotennet.models.representation.gotennet import GotenNet
+        from gotennet.models.components.ops import CosineCutoff
+        from gotennet.models.components.outputs import Atomwise3DOut
+        import torch.nn.functional as F
+
+        # Build cutoff function (GoFlow uses CosineCutoff without scaling param)
+        cutoff = args_dict.get('cutoff', 5.0)
+        cutoff_fn = CosineCutoff(cutoff=cutoff)
+
+        # Build GotenNet with GoFlow-compatible defaults
+        self.gotennet = GotenNet(
+            n_atom_basis=args_dict.get('n_atom_basis', 64),
+            n_atom_rdkit_feats=args_dict.get('n_atom_rdkit_feats', 28),
+            n_interactions=args_dict.get('n_interactions', 3),
+            radial_basis=args_dict.get('radial_basis', 'expnorm'),
+            n_rbf=args_dict.get('n_rbf', 20),
+            cutoff_fn=cutoff_fn,
+            edge_order=args_dict.get('edge_order', 4),
+            activation=args_dict.get('activation', 'swish'),
+            max_z=args_dict.get('max_z', 100),
+            weight_init=args_dict.get('weight_init', 'xavier_uniform'),
+            bias_init=args_dict.get('bias_init', 'zeros'),
+            int_layer_norm=args_dict.get('int_layer_norm', ''),
+            int_vector_norm=args_dict.get('int_vector_norm', ''),
+            num_heads=args_dict.get('num_heads', 8),
+            attn_dropout=args_dict.get('attn_dropout', 0.1),
+            edge_updates=args_dict.get('edge_updates', 'norej'),
+            aggr=args_dict.get('aggr', 'add'),
+            edge_ln=args_dict.get('edge_ln', ''),
+            sep_int_vec=args_dict.get('sep_int_vec', True),
+            lmax=args_dict.get('lmax', 2),
+        )
+
+        # Use the same Atomwise3DOut output layer as GoFlow
+        # This layer takes (h, X[:, :3, :]) and produces velocity (N, 3)
+        hidden_dim = args_dict.get('n_atom_basis', 64)
+        n_hidden = args_dict.get('output_n_hidden', 64)
+        self.atomwise_3D_out_layer = Atomwise3DOut(
+            n_in=hidden_dim,
+            n_hidden=n_hidden,
+            activation=F.silu
+        )
+
+    def forward(self, batch, time, conditional_batch=None, timesteps=None):
+        """
+        Forward pass matching Megalodon interface.
+
+        Args:
+            batch: Dict with ts_coord_t, numbers_t, bmat_r_t, bmat_p_t, edge_index, batch
+            time: Time tensor (G,)
+            conditional_batch: Optional conditional batch (not used)
+            timesteps: Number of timesteps for discrete time
+
+        Returns:
+            Dict with ts_coord_hat and logits for unchanged variables
+        """
+        timesteps = timesteps if timesteps is not None else self.timesteps
+        if self.time_type == "discrete" and timesteps is not None:
+            time = (timesteps - time.float()) / timesteps
+
+        device = batch["ts_coord_t"].device
+        pos = batch["ts_coord_t"]
+        graph_batch = batch["batch"]
+
+        # Get atom types
+        if batch["numbers_t"].dim() > 1:
+            atom_type = batch["numbers_t"].argmax(dim=-1)
+        else:
+            atom_type = batch["numbers_t"]
+
+        # Get bond types from one-hot
+        if batch["bmat_r_t"].dim() > 1:
+            bmat_r = batch["bmat_r_t"].argmax(dim=-1)
+            bmat_p = batch["bmat_p_t"].argmax(dim=-1)
+        else:
+            bmat_r = batch["bmat_r_t"]
+            bmat_p = batch["bmat_p_t"]
+
+        # Encode edge_type as r_bond * 22 + p_bond (TSDiff/GoFlow encoding)
+        edge_type = bmat_r * 22 + bmat_p
+
+        # Filter edges to match GoFlow's edge structure:
+        # 1. No self-loops (i != j)
+        # 2. Only edges with bonds in R or P (edge_type != 0)
+        # 3. Only intra-graph edges (same batch)
+        edge_index = batch["edge_index"]
+
+        # Self-loops filter
+        no_self_loop_mask = edge_index[0] != edge_index[1]
+
+        # Bond filter: keep only edges where there's a bond in R or P
+        # edge_type == 0 means r_bond=0 AND p_bond=0 (no bond in either)
+        has_bond_mask = edge_type != 0
+
+        # Intra-graph filter
+        same_graph_mask = graph_batch[edge_index[0]] == graph_batch[edge_index[1]]
+
+        # Combine all filters
+        valid_edge_mask = no_self_loop_mask & has_bond_mask & same_graph_mask
+
+        edge_index_filtered = edge_index[:, valid_edge_mask]
+        edge_type_filtered = edge_type[valid_edge_mask]
+
+        # Create r_feat and p_feat from atom features if available
+        # Default to zeros if not present
+        N = atom_type.size(0)
+        n_atom_rdkit_feats = self.args.get('n_atom_rdkit_feats', 28)
+
+        if "r_feat" in batch:
+            r_feat = batch["r_feat"]
+        else:
+            r_feat = torch.zeros(N, n_atom_rdkit_feats, device=device)
+
+        if "p_feat" in batch:
+            p_feat = batch["p_feat"]
+        else:
+            p_feat = torch.zeros(N, n_atom_rdkit_feats, device=device)
+
+        # Create inputs object for GotenNet
+        class GotenNetInputs:
+            pass
+
+        inputs = GotenNetInputs()
+        inputs.edge_index = edge_index_filtered
+        inputs.edge_type = edge_type_filtered
+        inputs.batch = graph_batch
+        inputs.atom_type = atom_type
+        inputs.r_feat = r_feat
+        inputs.p_feat = p_feat
+
+        # Run GotenNet
+        # Returns (h, X) where:
+        #   h: scalar node features [N, hidden_dim]
+        #   X: equivariant node features [N, L, hidden_dim] where L = (lmax+1)^2 - 1
+        h, X = self.gotennet(pos, time, inputs)
+
+        # Use Atomwise3DOut layer (same as GoFlow)
+        # Takes scalar features h and vector features X[:, :3, :] (l=1 irreps)
+        # Returns velocity (N, 3)
+        velocity = self.atomwise_3D_out_layer(h, X[:, :3, :])
+
+        # Output predicted coordinates (velocity for flow matching)
+        out = {
+            "ts_coord_hat": velocity,
+            "bmat_r_logits": batch["bmat_r_t"],
+            "bmat_p_logits": batch["bmat_p_t"],
+            "numbers_logits": batch["numbers_t"],
+        }
         return out

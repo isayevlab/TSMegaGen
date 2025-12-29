@@ -34,7 +34,7 @@ from megalodon.metrics.ts_evaluation_callback import TransitionStatesEvaluationC
 from megalodon.models.module import Graph3DInterpolantModel
 
 
-@hydra.main(version_base=None, config_path="conf/loqi", config_name=None)
+@hydra.main(version_base=None, config_path="conf", config_name=None)
 def main(cfg: DictConfig) -> None:
     """
     This is the main function conducting data loading and model training.
@@ -115,6 +115,15 @@ def main(cfg: DictConfig) -> None:
         mode=cfg.train.checkpoint_monitor_mode,
         filename="best-{epoch}-{step}--{" + metric_name + ":.3f}",
     )
+    # Additional checkpoint based on train loss as backup (saves best 5 by train loss epoch avg)
+    train_loss_checkpoint_callback = ModelCheckpoint(
+        dirpath=Path(cfg.outdir, 'checkpoints'),
+        save_top_k=5,
+        monitor="train/loss_epoch",
+        mode="min",
+        save_on_train_epoch_end=True,
+        filename="best_train-{epoch}-{step}",
+    )
     if cfg.evaluation.type == "molecules":
         energy_metrics_args = OmegaConf.to_container(cfg.evaluation.energy_metrics_args,
                                                  resolve=True) if cfg.evaluation.energy_metrics_args is not None else None
@@ -171,7 +180,7 @@ def main(cfg: DictConfig) -> None:
         max_epochs=cfg.train.n_epochs,
         logger=logger,
         callbacks=[lr_monitor, evaluation_callback, last_checkpoint_callback,
-                   best_checkpoint_callback],
+                   best_checkpoint_callback, train_loss_checkpoint_callback],
         enable_progress_bar=cfg.train.enable_progress_bar,
         accelerator='gpu',
         devices=cfg.train.gpus,

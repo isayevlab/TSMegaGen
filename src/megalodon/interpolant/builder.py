@@ -48,6 +48,7 @@ def build_interpolant(
     clip_t: float = 0.0,
     loss_weight_type: str = 'standard',  # 'uniform'
     loss_t_scale: float = 0.1,  # this makes max scale 1
+    prediction_type: str = 'data',  # 'data' (predict x1) or 'velocity' (predict v = x1 - x0)
     # TODO: here is where we add all the possible things that could go into any interpolant class
 ):
     """
@@ -144,7 +145,8 @@ def build_interpolant(
             clip_t,
             loss_weight_type,
             loss_t_scale,
-            inference_noise_sigma
+            inference_noise_sigma,
+            prediction_type,
         )
     elif interpolant_type == "discrete_diffusion":
         if prior_type in ["absorb", "mask"]:

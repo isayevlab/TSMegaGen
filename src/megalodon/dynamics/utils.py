@@ -142,6 +142,7 @@ class InterpolantLossFunction(nn.Module):
         discrete_class_weight=None,
         use_distance=None,
         distance_scale=None,
+        loss_type='mse',  # 'mse' or 'rmsd'
     ):
         super().__init__()
         if continuous:
@@ -157,6 +158,7 @@ class InterpolantLossFunction(nn.Module):
         self.scale = loss_scale
         self.use_distance = use_distance
         self.distance_scale = distance_scale
+        self.loss_type = loss_type  # 'mse' or 'rmsd'
 
     def forward(self, batch, logits, data, batch_weight=None, element_weight=None, level=10000):
         # d (λx, λh, λe) = (3, 0.4, 2)
@@ -176,9 +178,15 @@ class InterpolantLossFunction(nn.Module):
             loss = loss.clamp(0, level)
         # print(level)
         if self.aggregation == "mean":
-            loss = self.scale * loss.mean()
+            loss = loss.mean()
         elif self.aggregation == "sum":
-            loss = self.scale * loss.sum()
+            loss = loss.sum()
+
+        # Apply sqrt for RMSD-style loss (GoFlow uses sqrt(mean((pred - gt)^2)))
+        if self.loss_type == 'rmsd':
+            loss = torch.sqrt(loss)
+
+        loss = self.scale * loss
 
         return loss, output
 
