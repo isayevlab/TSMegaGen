@@ -18,17 +18,21 @@ data:
   scale_coords: &scale_coords 1.0
 
 loss:
+  use_loss_clamps: True
+  loss_clamp_epoch_threshold: 10
+  loss_clamps:
+    ts_coord: 1.0
   variables:
     - variable_name: 'ts_coord'
       loss_scale: 1.0
       aggregate: 'mean'
       continuous: True
-      loss_type: 'rmsd'  # GoFlow uses RMSD loss (sqrt of MSE)
+      loss_type: 'mse'
       use_distance: null
       distance_scale: null
 
 interpolant:
-  timesteps: &timesteps 25  # GoFlow uses fewer ODE steps (10-25 typical)
+  timesteps: &timesteps 25
   time_type: &time_type "continuous"
   sample_time_method: "uniform"
   sample_time_mean: 0
@@ -37,13 +41,19 @@ interpolant:
   min_t: &min_t 0.0
   variables:
     - variable_name: 'ts_coord'
-      interpolant_type: 'goflow'
+      interpolant_type: 'continuous_flow_matching' #["continuous_diffusion", "continuous_flow_matching"]
+      prediction_type: 'velocity'
+      optimal_transport: 'rigid' #'scale_ot'
       prior_type: 'gaussian'
       timesteps: *timesteps
       num_classes: 3
+      scheduler_type: "linear"
+      scheduler_cut: False
       time_type: *time_type
-      com_free: True
       min_t: *min_t
+      com_free: True
+      noise_sigma: 0.0
+      inference_noise_sigma: 0.
     - variable_name: 'numbers'
       interpolant_type: "discrete_null"
       num_classes: &num_atoms 54
@@ -82,6 +92,7 @@ dynamics:
 
 sample:
   node_distribution: null
+  return_step_output: true  # For GoFlow: return integrated position, not velocity
 
 train:
   seed: 48

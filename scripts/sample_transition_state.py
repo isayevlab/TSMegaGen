@@ -6,6 +6,7 @@ from argparse import ArgumentParser
 
 from rdkit import Chem
 from rdkit.Chem import AllChem
+from rdkit.Chem.rdchem import BondType as BT
 from rdkit.Geometry import Point3D
 
 from tqdm import tqdm
@@ -19,19 +20,17 @@ from megalodon.models.module import Graph3DInterpolantModel
 from megalodon.data.ts_batch_preprocessor import TsBatchPreProcessor
 from megalodon.metrics.ts_evaluation_callback import convert_coords_to_np
 
+# Simple bond type encoding:
+# 0: no bond, 1: single, 2: double, 3: triple, 4: aromatic, 5-8: stereo bonds
+BOND_TYPES = {
+    BT.SINGLE: 1,
+    BT.DOUBLE: 2,
+    BT.TRIPLE: 3,
+    BT.AROMATIC: 4,
+}
+NUM_BOND_TYPES = 9  # 0-8 inclusive
+
 Chem.SetUseLegacyStereoPerception(True)
-
-
-def coords_to_xyz_string(coords, numbers):
-    """Convert coordinates and atomic numbers to XYZ format string."""
-    n_atoms = len(numbers)
-    xyz_lines = [str(n_atoms), ""]
-
-    for atomic_num, coord in zip(numbers, coords):
-        symbol = Chem.GetPeriodicTable().GetElementSymbol(int(atomic_num))
-        xyz_lines.append(f"{symbol} {coord[0]:.6f} {coord[1]:.6f} {coord[2]:.6f}")
-
-    return "\n".join(xyz_lines)
 
 
 def infer_bonds_with_obabel(xyz_path, charge=0):
@@ -46,7 +45,7 @@ def infer_bonds_with_obabel(xyz_path, charge=0):
     mol = Chem.MolFromMolFile(mol_file, sanitize=False, removeHs=False)
     Chem.SanitizeMol(mol, sanitizeOps=Chem.SANITIZE_ALL ^ Chem.SANITIZE_KEKULIZE)
     os.unlink(mol_file)
-    
+
     return mol
 
 
@@ -79,62 +78,55 @@ def build_rdkit_mol(numbers, coords, bond_mat):
     return mol
 
 
-def add_stereo_bonds(mol, chi_bonds, ez_bonds, bmat, from_3D=True):
-    """Add stereo bonds to bond matrix based on RDKit molecule stereochemistry."""
-    result = []
+def add_stereo_bonds(mol, chi_bonds, ez_bonds, bmat, from_3D=False):
+    """
+    Add stereo bond information to adjacency matrix.
 
-    if from_3D and mol.GetNumConformers() > 0:
+    Args:
+        mol: RDKit molecule
+        chi_bonds: tuple of (chi_bond_1, chi_bond_2) indices for chirality
+        ez_bonds: dict mapping BondStereo to bond type index
+        bmat: adjacency matrix to modify
+        from_3D: if True, assign stereo from 3D coords; if False, use SMARTS notation
+    """
+    result = []
+    if from_3D:
         Chem.AssignStereochemistryFrom3D(mol, replaceExistingTags=True)
     else:
         Chem.AssignStereochemistry(mol, cleanIt=True, force=True)
 
     for bond in mol.GetBonds():
         stereo = bond.GetStereo()
-        # E/Z stereo
         if bond.GetBondType() == Chem.BondType.DOUBLE and stereo in ez_bonds:
             idx_3, idx_4 = bond.GetStereoAtoms()
             atom_1, atom_2 = bond.GetBeginAtom(), bond.GetEndAtom()
             idx_1, idx_2 = atom_1.GetIdx(), atom_2.GetIdx()
 
-            idx_5 = [nbr.GetIdx() for nbr in atom_1.GetNeighbors()
-                     if nbr.GetIdx() not in {idx_2, idx_3}]
-            idx_6 = [nbr.GetIdx() for nbr in atom_2.GetNeighbors()
-                     if nbr.GetIdx() not in {idx_1, idx_4}]
+            idx_5 = [nbr.GetIdx() for nbr in atom_1.GetNeighbors() if nbr.GetIdx() not in {idx_2, idx_3}]
+            idx_6 = [nbr.GetIdx() for nbr in atom_2.GetNeighbors() if nbr.GetIdx() not in {idx_1, idx_4}]
 
-            inv_stereo = (Chem.BondStereo.STEREOE
-                          if stereo == Chem.BondStereo.STEREOZ
-                          else Chem.BondStereo.STEREOZ)
-            result.extend([(idx_3, idx_4, ez_bonds[stereo]),
-                           (idx_4, idx_3, ez_bonds[stereo])])
+            inv_stereo = Chem.BondStereo.STEREOE if stereo == Chem.BondStereo.STEREOZ else Chem.BondStereo.STEREOZ
+            result.extend([(idx_3, idx_4, ez_bonds[stereo]), (idx_4, idx_3, ez_bonds[stereo])])
 
             if idx_5:
-                result.extend([(idx_5[0], idx_4, ez_bonds[inv_stereo]),
-                               (idx_4, idx_5[0], ez_bonds[inv_stereo])])
+                result.extend([(idx_5[0], idx_4, ez_bonds[inv_stereo]), (idx_4, idx_5[0], ez_bonds[inv_stereo])])
             if idx_6:
-                result.extend([(idx_3, idx_6[0], ez_bonds[inv_stereo]),
-                               (idx_6[0], idx_3, ez_bonds[inv_stereo])])
+                result.extend([(idx_3, idx_6[0], ez_bonds[inv_stereo]), (idx_6[0], idx_3, ez_bonds[inv_stereo])])
             if idx_5 and idx_6:
-                result.extend([(idx_5[0], idx_6[0], ez_bonds[stereo]),
-                               (idx_6[0], idx_5[0], ez_bonds[stereo])])
+                result.extend([(idx_5[0], idx_6[0], ez_bonds[stereo]), (idx_6[0], idx_5[0], ez_bonds[stereo])])
 
-        # Tetrahedral chirality (CIP)
         if bond.GetBeginAtom().HasProp('_CIPCode'):
             chirality = bond.GetBeginAtom().GetProp('_CIPCode')
             neighbors = bond.GetBeginAtom().GetNeighbors()
             if all(n.HasProp("_CIPRank") for n in neighbors):
-                sorted_neighbors = sorted(
-                    neighbors,
-                    key=lambda x: int(x.GetProp("_CIPRank")),
-                    reverse=True,
-                )
+                sorted_neighbors = sorted(neighbors, key=lambda x: int(x.GetProp("_CIPRank")), reverse=True)
                 sorted_neighbors = [a.GetIdx() for a in sorted_neighbors]
-                a, b, c = (sorted_neighbors[:3] if chirality == "R"
-                           else sorted_neighbors[:3][::-1])
-                d = sorted_neighbors[-1]
+                a_idx, b_idx, c_idx = sorted_neighbors[:3] if chirality == "R" else sorted_neighbors[:3][::-1]
+                d_idx = sorted_neighbors[-1]
                 result.extend([
-                    (a, d, chi_bonds[0]), (b, d, chi_bonds[0]), (c, d, chi_bonds[0]),
-                    (d, a, chi_bonds[0]), (d, b, chi_bonds[0]), (d, c, chi_bonds[0]),
-                    (b, a, chi_bonds[1]), (c, b, chi_bonds[1]), (a, c, chi_bonds[1]),
+                    (a_idx, d_idx, chi_bonds[0]), (b_idx, d_idx, chi_bonds[0]), (c_idx, d_idx, chi_bonds[0]),
+                    (d_idx, a_idx, chi_bonds[0]), (d_idx, b_idx, chi_bonds[0]), (d_idx, c_idx, chi_bonds[0]),
+                    (b_idx, a_idx, chi_bonds[1]), (c_idx, b_idx, chi_bonds[1]), (a_idx, c_idx, chi_bonds[1])
                 ])
 
     if len(result) > 0:
@@ -145,7 +137,37 @@ def add_stereo_bonds(mol, chi_bonds, ez_bonds, bmat, from_3D=True):
     return bmat
 
 
+def smarts_to_mol(mol):
+    """
+    Convert a SMARTS-derived molecule to a regular molecule.
+    SMARTS molecules have query atoms/bonds that prevent Kekulize from working.
+    This rebuilds the molecule with fresh atoms and bonds, preserving atom mappings.
+    """
+    rwmol = Chem.RWMol()
 
+    # Add atoms (fresh, non-query)
+    for atom in mol.GetAtoms():
+        new_atom = Chem.Atom(atom.GetAtomicNum())
+        new_atom.SetFormalCharge(atom.GetFormalCharge())
+        new_atom.SetAtomMapNum(atom.GetAtomMapNum())
+        new_atom.SetIsAromatic(atom.GetIsAromatic())
+        new_atom.SetNumExplicitHs(atom.GetNumExplicitHs())
+        rwmol.AddAtom(new_atom)
+
+    # Add bonds (fresh, non-query)
+    for bond in mol.GetBonds():
+        rwmol.AddBond(bond.GetBeginAtomIdx(), bond.GetEndAtomIdx(), bond.GetBondType())
+        new_bond = rwmol.GetBondBetweenAtoms(bond.GetBeginAtomIdx(), bond.GetEndAtomIdx())
+        new_bond.SetIsAromatic(bond.GetIsAromatic())
+
+    result = rwmol.GetMol()
+    Chem.SanitizeMol(result)
+    return result
+
+
+# ============================================================================
+# XYZ loading functions
+# ============================================================================
 
 def load_molecules_from_input(input_path_or_str, use_3d=True):
     """
@@ -335,47 +357,236 @@ def create_reactions_from_inputs(reactant_input, product_input, use_3d=True, cha
     ]
 
 
-def main():
-    parser = ArgumentParser(description="Sample transition states for reactions")
+# ============================================================================
+# SMARTS processing
+# ============================================================================
 
+def process_reaction_smarts(r_smarts, p_smarts, charge=0, kekulize=False, add_stereo=False):
+    """
+    Process reaction SMARTS into a megalodon-compatible Data object.
+
+    Bond encoding: 0=none, 1=single, 2=double, 3=triple, 4=aromatic, 5-8=stereo
+
+    Args:
+        r_smarts: Reactant SMARTS string (with atom mapping)
+        p_smarts: Product SMARTS string (with atom mapping)
+        charge: Molecular charge
+        kekulize: If True, kekulize aromatic bonds to explicit single/double
+        add_stereo: If True, add stereo bond information (E/Z and chirality)
+
+    Returns:
+        PyG Data object with: numbers, charges, edge_index, edge_attr, ts_coord, etc.
+    """
+    r = Chem.MolFromSmarts(r_smarts)
+    p = Chem.MolFromSmarts(p_smarts)
+    Chem.SanitizeMol(r)
+    Chem.SanitizeMol(p)
+
+    if kekulize:
+        r = smarts_to_mol(r)
+        p = smarts_to_mol(p)
+        Chem.Kekulize(r, clearAromaticFlags=True)
+        Chem.Kekulize(p, clearAromaticFlags=True)
+
+    N = r.GetNumAtoms()
+    assert p.GetNumAtoms() == N, f"Reactant has {N} atoms but product has {p.GetNumAtoms()}"
+
+    # Get atom mappings and reorder
+    r_perm = np.array([a.GetAtomMapNum() for a in r.GetAtoms()]) - 1
+    p_perm = np.array([a.GetAtomMapNum() for a in p.GetAtoms()]) - 1
+    r_perm_inv = np.argsort(r_perm)
+    p_perm_inv = np.argsort(p_perm)
+
+    # Get atomic numbers
+    r_atomic_numbers = np.array([r.GetAtomWithIdx(int(i)).GetAtomicNum() for i in r_perm_inv])
+    p_atomic_numbers = np.array([p.GetAtomWithIdx(int(i)).GetAtomicNum() for i in p_perm_inv])
+    assert np.array_equal(r_atomic_numbers, p_atomic_numbers), "Reactant and product must have same atoms"
+
+    numbers = torch.from_numpy(r_atomic_numbers).to(torch.uint8)
+
+    # Get adjacency matrices
+    r_adj = Chem.rdmolops.GetAdjacencyMatrix(r)
+    p_adj = Chem.rdmolops.GetAdjacencyMatrix(p)
+    r_adj_perm = r_adj[r_perm_inv, :].T[r_perm_inv, :].T
+    p_adj_perm = p_adj[p_perm_inv, :].T[p_perm_inv, :].T
+
+    # Union of adjacency matrices for edge connectivity
+    adj = r_adj_perm + p_adj_perm
+    row, col = adj.nonzero()
+
+    # Extract bond types: 0=no bond, 1=single, 2=double, 3=triple, 4=aromatic
+    _nonbond = 0
+
+    r_edge_type = []
+    for i, j in zip(r_perm_inv[row], r_perm_inv[col]):
+        b = r.GetBondBetweenAtoms(int(i), int(j))
+        if b is not None:
+            r_edge_type.append(BOND_TYPES.get(b.GetBondType(), 1))
+        else:
+            r_edge_type.append(_nonbond)
+
+    p_edge_type = []
+    for i, j in zip(p_perm_inv[row], p_perm_inv[col]):
+        b = p.GetBondBetweenAtoms(int(i), int(j))
+        if b is not None:
+            p_edge_type.append(BOND_TYPES.get(b.GetBondType(), 1))
+        else:
+            p_edge_type.append(_nonbond)
+
+    edge_index = torch.tensor([row, col], dtype=torch.long)
+    r_edge_type = torch.tensor(r_edge_type, dtype=torch.uint8)
+    p_edge_type = torch.tensor(p_edge_type, dtype=torch.uint8)
+
+    # Sort by (row * N + col)
+    perm = (edge_index[0] * N + edge_index[1]).argsort()
+    edge_index = edge_index[:, perm]
+    r_edge_type = r_edge_type[perm]
+    p_edge_type = p_edge_type[perm]
+
+    # Optionally add stereo bond information
+    if add_stereo:
+        chi_bonds = (5, 6)
+        ez_bonds = {
+            Chem.BondStereo.STEREOE: 7,
+            Chem.BondStereo.STEREOZ: 8,
+        }
+
+        r_bmat = np.zeros((N, N), dtype=np.int64)
+        p_bmat = np.zeros((N, N), dtype=np.int64)
+
+        for idx, (i, j) in enumerate(zip(edge_index[0].tolist(), edge_index[1].tolist())):
+            r_bmat[i, j] = r_edge_type[idx].item()
+            p_bmat[i, j] = p_edge_type[idx].item()
+
+        r_bmat = add_stereo_bonds(r, chi_bonds, ez_bonds, r_bmat, from_3D=False)
+        p_bmat = add_stereo_bonds(p, chi_bonds, ez_bonds, p_bmat, from_3D=False)
+
+        existing_edges = set(zip(edge_index[0].tolist(), edge_index[1].tolist()))
+        new_edges = []
+        new_r_types = []
+        new_p_types = []
+
+        for i in range(N):
+            for j in range(N):
+                if i != j and (i, j) not in existing_edges:
+                    if r_bmat[i, j] > 0 or p_bmat[i, j] > 0:
+                        new_edges.append((i, j))
+                        new_r_types.append(r_bmat[i, j])
+                        new_p_types.append(p_bmat[i, j])
+
+        if new_edges:
+            new_edge_index = torch.tensor(new_edges, dtype=torch.long).T
+            new_r_edge_type = torch.tensor(new_r_types, dtype=torch.uint8)
+            new_p_edge_type = torch.tensor(new_p_types, dtype=torch.uint8)
+
+            edge_index = torch.cat([edge_index, new_edge_index], dim=1)
+            r_edge_type = torch.cat([r_edge_type, new_r_edge_type])
+            p_edge_type = torch.cat([p_edge_type, new_p_edge_type])
+
+            perm = (edge_index[0] * N + edge_index[1]).argsort()
+            edge_index = edge_index[:, perm]
+            r_edge_type = r_edge_type[perm]
+            p_edge_type = p_edge_type[perm]
+
+    # Store edge_attr as [r_edge_type, p_edge_type] - NOT combined encoding
+    edge_attr = torch.stack([r_edge_type, p_edge_type], dim=-1)
+
+    # Coordinates - zeros since we're sampling
+    pos = torch.zeros(N, 3, dtype=torch.float32)
+
+    smiles = f"{r_smarts}>>{p_smarts}"
+
+    data = Data(
+        numbers=numbers,
+        charges=torch.full((N,), charge, dtype=torch.int8),
+        ts_coord=pos,
+        r_coord=pos.clone(),
+        p_coord=pos.clone(),
+        edge_index=edge_index,
+        edge_attr=edge_attr,
+        num_nodes=N,
+        id=smiles,
+    )
+    return data
+
+
+def coords_to_xyz_string(coords, numbers):
+    """Convert coordinates and atomic numbers to XYZ format string."""
+    n_atoms = len(numbers)
+    xyz_lines = [str(n_atoms), ""]
+
+    for atomic_num, coord in zip(numbers, coords):
+        symbol = Chem.GetPeriodicTable().GetElementSymbol(int(atomic_num))
+        xyz_lines.append(f"{symbol} {coord[0]:.6f} {coord[1]:.6f} {coord[2]:.6f}")
+
+    return "\n".join(xyz_lines)
+
+
+# ============================================================================
+# Main function
+# ============================================================================
+
+def main():
+    parser = ArgumentParser(description="Sample transition states from reaction SMARTS")
+
+    # Input options
     parser.add_argument(
         "--reactant_smi",
         type=str,
-        help="SMILES string for reactant (should already have hydrogens, supports atom mapping)",
+        help="Reactant SMARTS string (with atom mapping)",
     )
     parser.add_argument(
         "--product_smi",
         type=str,
-        help="SMILES string for product (should already have hydrogens, supports atom mapping)",
+        help="Product SMARTS string (with atom mapping)",
+    )
+    parser.add_argument(
+        "--reaction_smarts",
+        type=str,
+        help="Reaction SMARTS string (e.g., 'R>>P' format with atom mapping)",
+    )
+    parser.add_argument(
+        "--reaction_file",
+        type=str,
+        help="File containing reaction SMARTS (one per line)",
     )
     parser.add_argument("--reactant_xyz", type=str, help="XYZ file path for reactant(s)")
     parser.add_argument("--product_xyz", type=str, help="XYZ file path for product(s)")
 
+    # Model options
     parser.add_argument("--config", type=str, required=True, help="Config YAML file")
     parser.add_argument("--ckpt", type=str, required=True, help="Checkpoint file")
     parser.add_argument("--output", type=str, required=True, help="Output XYZ file path")
 
+    # Sampling options
     parser.add_argument(
         "--n_samples", type=int, default=1, help="Number of samples per reaction"
     )
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
     parser.add_argument("--charge", type=int, default=0, help="Molecular charge")
     parser.add_argument(
-        "--no_3d", action="store_true", help="Skip 3D embedding generation"
+        "--num_steps", type=int, default=None, help="Number of diffusion steps (overrides config)"
+    )
+    parser.add_argument(
+        "--kekulize", action="store_true", help="Kekulize aromatic bonds to explicit single/double"
+    )
+    parser.add_argument(
+        "--add_stereo", action="store_true", help="Add stereo bond information (E/Z and chirality)"
     )
 
     args = parser.parse_args()
 
-    # Determine input type
-    if args.reactant_smi and args.product_smi:
-        reactant_input = args.reactant_smi
-        product_input = args.product_smi
-    elif args.reactant_xyz and args.product_xyz:
-        reactant_input = args.reactant_xyz
-        product_input = args.product_xyz
-    else:
+    # Determine input type and create data
+    use_xyz_input = args.reactant_xyz and args.product_xyz
+    use_smarts_input = (args.reactant_smi and args.product_smi) or args.reaction_smarts or args.reaction_file
+
+    if use_xyz_input and use_smarts_input:
+        raise ValueError("Cannot use both XYZ and SMARTS inputs simultaneously")
+
+    if not use_xyz_input and not use_smarts_input:
         raise ValueError(
-            "Must provide either --reactant_smi/--product_smi or --reactant_xyz/--product_xyz"
+            "Must provide either --reactant_xyz/--product_xyz, "
+            "--reactant_smi/--product_smi, --reaction_smarts, or --reaction_file"
         )
 
     # Load model
@@ -391,23 +602,57 @@ def main():
         interpolant_params=cfg.interpolant,
         sampling_params=cfg.sample,
         batch_preprocessor=batch_preprocessor,
+        strict=False,
     )
     model = model.to("cuda").eval()
 
-    # Load reactions
-    use_3d = not args.no_3d
-    reaction_data_list = create_reactions_from_inputs(
-        reactant_input, product_input, use_3d=use_3d, charge=args.charge
-    )
-
-    if len(reaction_data_list) == 0:
-        raise ValueError("No valid reactions could be created from inputs")
-
-    # Replicate reactions n_samples times
+    # Process reactions based on input type
     all_data_list = []
-    for data in reaction_data_list:
-        for _ in range(args.n_samples):
-            all_data_list.append(deepcopy(data))
+
+    if use_xyz_input:
+        # XYZ input path
+        print(f"Loading reactions from XYZ files: {args.reactant_xyz}, {args.product_xyz}")
+        reaction_data_list = create_reactions_from_inputs(
+            args.reactant_xyz, args.product_xyz, use_3d=True, charge=args.charge
+        )
+        # Replicate for n_samples
+        for data in reaction_data_list:
+            for _ in range(args.n_samples):
+                all_data_list.append(deepcopy(data))
+        print(f"Created {len(all_data_list)} data samples for {len(reaction_data_list)} reaction(s)")
+
+    else:
+        # SMARTS input path
+        if args.reactant_smi and args.product_smi:
+            reaction_smarts_list = [f"{args.reactant_smi}>>{args.product_smi}"]
+        elif args.reaction_smarts:
+            reaction_smarts_list = [args.reaction_smarts]
+        elif args.reaction_file:
+            with open(args.reaction_file) as f:
+                reaction_smarts_list = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+
+        print(f"Processing {len(reaction_smarts_list)} reaction(s)")
+
+        for reaction_smarts in reaction_smarts_list:
+            try:
+                r_smi, p_smi = reaction_smarts.split(">>")
+                data = process_reaction_smarts(
+                    r_smi, p_smi,
+                    charge=args.charge,
+                    kekulize=args.kekulize,
+                    add_stereo=args.add_stereo
+                )
+                # Replicate for n_samples
+                for _ in range(args.n_samples):
+                    all_data_list.append(deepcopy(data))
+            except Exception as e:
+                print(f"Warning: Failed to process reaction '{reaction_smarts[:50]}...': {e}")
+                continue
+
+        print(f"Created {len(all_data_list)} data samples for {len(reaction_smarts_list)} reaction(s)")
+
+    if len(all_data_list) == 0:
+        raise ValueError("No valid reactions could be created from inputs")
 
     loader = DataLoader(all_data_list, batch_size=args.batch_size)
 
@@ -416,13 +661,16 @@ def main():
     reference_data = []
     ids = []
 
+    # Override timesteps if specified
+    timesteps = args.num_steps if args.num_steps is not None else cfg.interpolant.timesteps
+
     for batch in tqdm(loader, desc="Sampling transition states"):
         batch = batch.to(model.device)
         batch = batch_preprocessor(batch)
 
         with torch.no_grad():
             sample = model.sample(
-                batch=batch, timesteps=cfg.interpolant.timesteps, pre_format=False
+                batch=batch, timesteps=timesteps, pre_format=False
             )
 
         coords_list = convert_coords_to_np(sample)
@@ -432,41 +680,30 @@ def main():
         for i in range(len(coords_list)):
             batch_mask = batch["batch"] == i
             ref_data = {
-                "r_coord": batch["r_coord"][batch_mask].cpu().numpy(),
-                "p_coord": batch["p_coord"][batch_mask].cpu().numpy(),
                 "numbers": batch["numbers"][batch_mask].cpu().numpy(),
                 "charge": args.charge,
-                "id": batch["id"][i]
-                if isinstance(batch["id"][i], str)
-                else str(batch["id"][i]),
+                "id": batch["id"][i] if isinstance(batch["id"][i], str) else str(batch["id"][i]),
             }
             reference_data.append(ref_data)
             ids.append(ref_data["id"])
 
-    # Save output as XYZ files
-    base_path = (
-        args.output.rsplit(".", 1)[0] if args.output.endswith(".xyz") else args.output
-    )
-
-    for idx, (coords, ref_data) in enumerate(
-        zip(generated_ts_coords, reference_data)
-    ):
-        if len(generated_ts_coords) == 1 and args.output.endswith(".xyz"):
-            xyz_path = args.output
-        else:
-            xyz_path = f"{base_path}_{idx + 1}.xyz"
-
-        xyz_content = coords_to_xyz_string(coords, ref_data["numbers"])
-        with open(xyz_path, "w") as f:
+    # Save output as XYZ file(s)
+    if len(generated_ts_coords) == 1:
+        # Single sample: write to output file directly
+        xyz_content = coords_to_xyz_string(generated_ts_coords[0], reference_data[0]["numbers"])
+        with open(args.output, "w") as f:
             f.write(xyz_content)
+    else:
+        # Multiple samples: write all to a single XYZ file
+        with open(args.output, "w") as f:
+            for coords, ref_data in zip(generated_ts_coords, reference_data):
+                xyz_content = coords_to_xyz_string(coords, ref_data["numbers"])
+                f.write(xyz_content + "\n")
 
     print(
         f"Generated {len(generated_ts_coords)} transition states for {len(set(ids))} unique reactions."
     )
-    print(
-        f"Output saved to: {args.output}"
-        + (f" (and numbered files)" if len(generated_ts_coords) > 1 else "")
-    )
+    print(f"Output saved to: {args.output}")
 
 
 if __name__ == "__main__":
