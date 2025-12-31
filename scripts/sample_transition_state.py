@@ -52,23 +52,15 @@ def infer_bonds_with_obabel(xyz_path, charge=0):
 def build_rdkit_mol(numbers, coords, bond_mat):
     """Build RDKit molecule from atomic numbers, coordinates, and bond matrix."""
     mol = Chem.RWMol()
+    bond_num_to_type = {v: k for k, v in BOND_TYPES.items()}
     for num in numbers:
         atom = Chem.Atom(int(num))
         mol.AddAtom(atom)
 
     for i in range(len(numbers)):
         for j in range(i + 1, len(numbers)):
-            if bond_mat[i, j] >= 1.0:
-                if bond_mat[i, j] == 1:
-                    bond_type = Chem.BondType.SINGLE
-                elif bond_mat[i, j] == 2:
-                    bond_type = Chem.BondType.DOUBLE
-                elif bond_mat[i, j] == 3:
-                    bond_type = Chem.BondType.TRIPLE
-                else:
-                    bond_type = Chem.BondType.SINGLE
-
-                mol.AddBond(i, j, bond_type)
+            bond_type = bond_num_to_type[bond_mat[i, j]]
+            mol.AddBond(i, j, bond_type)
 
     mol = mol.GetMol()
     conf = Chem.Conformer(len(numbers))
