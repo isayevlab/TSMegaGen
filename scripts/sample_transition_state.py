@@ -59,7 +59,10 @@ def build_rdkit_mol(numbers, coords, bond_mat):
 
     for i in range(len(numbers)):
         for j in range(i + 1, len(numbers)):
-            bond_type = bond_num_to_type[bond_mat[i, j]]
+            bond_type_num = bond_mat[i, j]
+            if bond_type_num == 0:  # No bond
+                continue
+            bond_type = bond_num_to_type[bond_type_num]
             mol.AddBond(i, j, bond_type)
 
     mol = mol.GetMol()
@@ -127,34 +130,6 @@ def add_stereo_bonds(mol, chi_bonds, ez_bonds, bmat, from_3D=False):
             if bmat[i, j] == 0:
                 bmat[i, j] = v
     return bmat
-
-
-def smarts_to_mol(mol):
-    """
-    Convert a SMARTS-derived molecule to a regular molecule.
-    SMARTS molecules have query atoms/bonds that prevent Kekulize from working.
-    This rebuilds the molecule with fresh atoms and bonds, preserving atom mappings.
-    """
-    rwmol = Chem.RWMol()
-
-    # Add atoms (fresh, non-query)
-    for atom in mol.GetAtoms():
-        new_atom = Chem.Atom(atom.GetAtomicNum())
-        new_atom.SetFormalCharge(atom.GetFormalCharge())
-        new_atom.SetAtomMapNum(atom.GetAtomMapNum())
-        new_atom.SetIsAromatic(atom.GetIsAromatic())
-        new_atom.SetNumExplicitHs(atom.GetNumExplicitHs())
-        rwmol.AddAtom(new_atom)
-
-    # Add bonds (fresh, non-query)
-    for bond in mol.GetBonds():
-        rwmol.AddBond(bond.GetBeginAtomIdx(), bond.GetEndAtomIdx(), bond.GetBondType())
-        new_bond = rwmol.GetBondBetweenAtoms(bond.GetBeginAtomIdx(), bond.GetEndAtomIdx())
-        new_bond.SetIsAromatic(bond.GetIsAromatic())
-
-    result = rwmol.GetMol()
-    Chem.SanitizeMol(result)
-    return result
 
 
 # ============================================================================
@@ -369,14 +344,13 @@ def process_reaction_smarts(r_smarts, p_smarts, charge=0, kekulize=False, add_st
     Returns:
         PyG Data object with: numbers, charges, edge_index, edge_attr, ts_coord, etc.
     """
-    r = Chem.MolFromSmarts(r_smarts)
-    p = Chem.MolFromSmarts(p_smarts)
-    Chem.SanitizeMol(r)
-    Chem.SanitizeMol(p)
+    # Parse as SMILES with explicit Hs preserved (removeHs=False)
+    params = Chem.SmilesParserParams()
+    params.removeHs = False
+    r = Chem.MolFromSmiles(r_smarts, params)
+    p = Chem.MolFromSmiles(p_smarts, params)
 
     if kekulize:
-        r = smarts_to_mol(r)
-        p = smarts_to_mol(p)
         Chem.Kekulize(r, clearAromaticFlags=True)
         Chem.Kekulize(p, clearAromaticFlags=True)
 
@@ -658,11 +632,10 @@ def main():
 
     for batch in tqdm(loader, desc="Sampling transition states"):
         batch = batch.to(model.device)
-        batch = batch_preprocessor(batch)
 
         with torch.no_grad():
             sample = model.sample(
-                batch=batch, timesteps=timesteps, pre_format=False
+                batch=batch, timesteps=timesteps, pre_format=True
             )
 
         coords_list = convert_coords_to_np(sample)

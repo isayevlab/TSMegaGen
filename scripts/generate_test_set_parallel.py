@@ -118,11 +118,10 @@ def worker(gpu_id, job_queue, completed_queue, config, ckpt, output_dir, n_sampl
 
             for batch in loader:
                 batch = batch.to(model.device)
-                batch = batch_preprocessor(batch)
 
                 with torch.no_grad():
                     sample = model.sample(
-                        batch=batch, timesteps=timesteps, pre_format=False
+                        batch=batch, timesteps=timesteps, pre_format=True
                     )
 
                 coords_list = convert_coords_to_np(sample)

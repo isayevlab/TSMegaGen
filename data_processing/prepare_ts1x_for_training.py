@@ -149,34 +149,6 @@ def add_stereo_bonds(mol, chi_bonds, ez_bonds, bmat, from_3D=True):
     return bmat
 
 
-def smarts_to_mol(mol):
-    """
-    Convert a SMARTS-derived molecule to a regular molecule.
-    SMARTS molecules have query atoms/bonds that prevent Kekulize from working.
-    This rebuilds the molecule with fresh atoms and bonds, preserving atom mappings.
-    """
-    rwmol = Chem.RWMol()
-
-    # Add atoms (fresh, non-query)
-    for atom in mol.GetAtoms():
-        new_atom = Chem.Atom(atom.GetAtomicNum())
-        new_atom.SetFormalCharge(atom.GetFormalCharge())
-        new_atom.SetAtomMapNum(atom.GetAtomMapNum())
-        new_atom.SetIsAromatic(atom.GetIsAromatic())
-        new_atom.SetNumExplicitHs(atom.GetNumExplicitHs())
-        rwmol.AddAtom(new_atom)
-
-    # Add bonds (fresh, non-query)
-    for bond in mol.GetBonds():
-        rwmol.AddBond(bond.GetBeginAtomIdx(), bond.GetEndAtomIdx(), bond.GetBondType())
-        new_bond = rwmol.GetBondBetweenAtoms(bond.GetBeginAtomIdx(), bond.GetEndAtomIdx())
-        new_bond.SetIsAromatic(bond.GetIsAromatic())
-
-    result = rwmol.GetMol()
-    Chem.SanitizeMol(result)
-    return result
-
-
 def process_reaction(r_smarts, p_smarts, xyz_block, kekulize=False, add_stereo=False):
     """
     Process a single reaction from SMARTS and XYZ block.
@@ -197,17 +169,13 @@ def process_reaction(r_smarts, p_smarts, xyz_block, kekulize=False, add_stereo=F
         kekulize: If True, kekulize aromatic bonds to explicit single/double
         add_stereo: If True, add stereo bond information (E/Z and chirality)
     """
-    # Parse SMARTS
-    r = Chem.MolFromSmarts(r_smarts)
-    p = Chem.MolFromSmarts(p_smarts)
-    Chem.SanitizeMol(r)
-    Chem.SanitizeMol(p)
+    # Parse as SMILES with explicit Hs preserved (removeHs=False)
+    params = Chem.SmilesParserParams()
+    params.removeHs = False
+    r = Chem.MolFromSmiles(r_smarts, params)
+    p = Chem.MolFromSmiles(p_smarts, params)
 
     if kekulize:
-        # Convert SMARTS molecules to regular molecules (removes query features)
-        # This is necessary because Kekulize fails silently on query bonds
-        r = smarts_to_mol(r)
-        p = smarts_to_mol(p)
         Chem.Kekulize(r, clearAromaticFlags=True)
         Chem.Kekulize(p, clearAromaticFlags=True)
 
@@ -280,12 +248,12 @@ def process_reaction(r_smarts, p_smarts, xyz_block, kekulize=False, add_stereo=F
     # Optionally add stereo bond information
     if add_stereo:
         # Stereo bond type indices (5-8):
-        # 5: chirality bond type 1, 6: chirality bond type 2
-        # 7: E stereo, 8: Z stereo
-        chi_bonds = (5, 6)  # Chirality bonds
+        # 5: E stereo, 6: Z stereo
+        # 7: chirality bond type 1, 8: chirality bond type 2
+        chi_bonds = [7, 8]  # Chirality bonds
         ez_bonds = {
-            Chem.BondStereo.STEREOE: 7,
-            Chem.BondStereo.STEREOZ: 8,
+            Chem.BondStereo.STEREOE: 5,
+            Chem.BondStereo.STEREOZ: 6,
         }
 
         # Build RDKit mol with 3D coordinates for stereo assignment
